@@ -1,8 +1,13 @@
 ﻿# models/database.py
 import json
+import sys
 import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from config import POLLS_FILE
 from datetime import datetime
 from typing import Any, Dict, List, Optional
+
 
 class BaseDatabase:
     """Базовый класс для работы с JSON файлами"""
