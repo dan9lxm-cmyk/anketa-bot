@@ -7,6 +7,7 @@ import discord
 
 from models.database import PollsDB
 
+
 class PollManager:
     """Менеджер опросов и голосований"""
     
@@ -59,10 +60,9 @@ class PollManager:
                 # Продолжаем голосование
                 await self._run_voting_task(poll_id)
     
-    async def create_poll(self, ctx: discord.ApplicationContext, title: str,
-                          duration: int, notify_time: int,
-                          voting_title: str, voting_duration: int,
-                          voting_notify_time: int, options: List[str]) -> Tuple[bool, str, Optional[str]]:
+    async def create_poll(self, ctx, title: str, duration: int, notify_time: int,
+                          voting_title: str, voting_duration: int, voting_notify_time: int,
+                          options: List[str]) -> Tuple[bool, str, Optional[str]]:
         """Создает новый опрос"""
         
         # Проверяем, есть ли уже активный опрос
@@ -70,6 +70,9 @@ class PollManager:
             return False, "❌ Уже есть активный опрос или голосование!", None
         
         poll_id = f"poll_{ctx.author.id}_{int(datetime.now().timestamp())}"
+        
+        # Сохраняем ID гильдии для восстановления
+        guild_id = str(ctx.guild.id) if ctx.guild else None
         
         # Создаем опрос в БД
         poll_data = self.db.create_poll(
@@ -84,6 +87,11 @@ class PollManager:
             voting_notify_time,
             options
         )
+        
+        # Сохраняем ID гильдии
+        if guild_id:
+            poll_data["guild_id"] = guild_id
+            self.db.update_poll(poll_id, {"guild_id": guild_id})
         
         # Отправляем сообщение о создании опроса
         embed = discord.Embed(
@@ -101,6 +109,9 @@ class PollManager:
         channel = await self._get_poll_channel(ctx.guild)
         if not channel:
             return False, "❌ Не удалось найти канал для опросов!", None
+        
+        # Импортируем здесь, чтобы избежать циклических импортов
+        from views.poll_views import PollView
         
         message = await channel.send(embed=embed, view=PollView(poll_id, self))
         self.db.add_poll_message(poll_id, str(message.id))
@@ -125,7 +136,9 @@ class PollManager:
         end_time = start_time + timedelta(seconds=duration)
         
         # Ждем до завершения опроса
-        await asyncio.sleep((end_time - datetime.now()).total_seconds())
+        remaining = (end_time - datetime.now()).total_seconds()
+        if remaining > 0:
+            await asyncio.sleep(remaining)
         
         # Проверяем, не был ли опрос прерван
         poll = self.db.get_poll(poll_id)
@@ -153,7 +166,10 @@ class PollManager:
             "voting_started_at": poll["voting_started_at"]
         })
         
-        channel = await self._get_poll_channel(self.bot.get_guild(int(poll.get("guild_id", 0))))
+        # Получаем гильдию
+        guild_id = poll.get("guild_id")
+        guild = self.bot.get_guild(int(guild_id)) if guild_id else None
+        channel = await self._get_poll_channel(guild)
         if not channel:
             return
         
@@ -171,8 +187,8 @@ class PollManager:
         embed.set_footer(text=f"ID: {poll_id[:8]} | Голосование завершится через {poll['voting_duration']}с")
         
         # Создаем кнопки для голосования
-        view = VotingView(poll_id, self)
-        message = await channel.send(embed=embed, view=view)
+        from views.poll_views import VotingView
+        message = await channel.send(embed=embed, view=VotingView(poll_id, self))
         self.db.add_voting_message(poll_id, str(message.id))
         
         # Отправляем уведомление о начале голосования
@@ -180,6 +196,11 @@ class PollManager:
         
         # Запускаем задачу голосования
         asyncio.create_task(self._run_voting_task(poll_id))
+        
+        # Отправляем уведомление о скором завершении
+        voting_notify = poll.get("voting_notify_time", 10)
+        if voting_notify > 0 and voting_notify < poll["voting_duration"]:
+            await self._schedule_notification(poll_id, "voting", voting_notify)
     
     async def _run_voting_task(self, poll_id: str):
         """Запускает задачу голосования"""
@@ -192,7 +213,9 @@ class PollManager:
         end_time = start_time + timedelta(seconds=duration)
         
         # Ждем до завершения голосования
-        await asyncio.sleep((end_time - datetime.now()).total_seconds())
+        remaining = (end_time - datetime.now()).total_seconds()
+        if remaining > 0:
+            await asyncio.sleep(remaining)
         
         # Проверяем, не было ли прервано голосование
         poll = self.db.get_poll(poll_id)
@@ -214,7 +237,10 @@ class PollManager:
         poll["is_active"] = False
         self.db.complete_poll(poll_id)
         
-        channel = await self._get_poll_channel(self.bot.get_guild(int(poll.get("guild_id", 0))))
+        # Получаем гильдию
+        guild_id = poll.get("guild_id")
+        guild = self.bot.get_guild(int(guild_id)) if guild_id else None
+        channel = await self._get_poll_channel(guild)
         if not channel:
             return
         
@@ -247,8 +273,8 @@ class PollManager:
             creator = await self.bot.fetch_user(int(poll["creator_id"]))
             if creator:
                 await creator.send(f"📊 **Голосование завершено!**\n{poll['voting_title']}\n\n{result_text}")
-        except:
-            pass
+        except Exception as e:
+            print(f"❌ Ошибка уведомления создателя: {e}")
     
     async def _schedule_notification(self, poll_id: str, phase: str, delay: int):
         """Планирует уведомление"""
@@ -258,16 +284,17 @@ class PollManager:
         if not poll or poll.get("aborted", False):
             return
         
-        channel = await self._get_poll_channel(self.bot.get_guild(int(poll.get("guild_id", 0))))
+        # Получаем гильдию
+        guild_id = poll.get("guild_id")
+        guild = self.bot.get_guild(int(guild_id)) if guild_id else None
+        channel = await self._get_poll_channel(guild)
         if not channel:
             return
         
         if phase == "poll":
             await channel.send(f"🔔 **Внимание!** Опрос заканчивается через {delay} секунд!\nГолосование начнется сразу после завершения опроса.")
-            await self._schedule_notification(poll_id, "poll_final", delay // 2)
         elif phase == "voting":
             await channel.send(f"🔔 **Внимание!** Голосование заканчивается через {delay} секунд!")
-            await self._schedule_notification(poll_id, "voting_final", delay // 2)
     
     async def end_poll_early(self, poll_id: str, user_id: str) -> bool:
         """Досрочно завершает опрос/голосование"""
@@ -278,7 +305,8 @@ class PollManager:
         # Проверяем, что пользователь - создатель или админ
         if str(poll["creator_id"]) != str(user_id):
             # Проверяем права админа
-            guild = self.bot.get_guild(int(poll.get("guild_id", 0)))
+            guild_id = poll.get("guild_id")
+            guild = self.bot.get_guild(int(guild_id)) if guild_id else None
             if not guild:
                 return False
             member = guild.get_member(int(user_id))
@@ -311,7 +339,8 @@ class PollManager:
         
         # Проверяем, что пользователь - создатель или админ
         if str(poll["creator_id"]) != str(user_id):
-            guild = self.bot.get_guild(int(poll.get("guild_id", 0)))
+            guild_id = poll.get("guild_id")
+            guild = self.bot.get_guild(int(guild_id)) if guild_id else None
             if not guild:
                 return False
             member = guild.get_member(int(user_id))
@@ -321,7 +350,9 @@ class PollManager:
         self.db.abort_poll(poll_id)
         
         # Отправляем сообщение о прерывании
-        channel = await self._get_poll_channel(self.bot.get_guild(int(poll.get("guild_id", 0))))
+        guild_id = poll.get("guild_id")
+        guild = self.bot.get_guild(int(guild_id)) if guild_id else None
+        channel = await self._get_poll_channel(guild)
         if channel:
             await channel.send(f"🛑 **Опрос/голосование прерван!**\n{poll['title']}")
         
@@ -331,6 +362,8 @@ class PollManager:
         """Получает канал для опросов"""
         if not guild:
             return None
+        
+        from config import POLL_CHANNEL_NAME
         
         channel = discord.utils.get(guild.channels, name=POLL_CHANNEL_NAME)
         if not channel:
