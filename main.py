@@ -23,15 +23,20 @@ intents.members = True
 intents.message_content = True
 intents.guilds = True
 
-bot = commands.Bot(command_prefix='!', intents=intents)
+bot = commands.Bot(command_prefix='!', intents=intents)  # ← СНАЧАЛА создаём бота
 
-# Инициализация менеджеров
+# Инициализация менеджеров (ПОСЛЕ создания бота)
 poll_manager = PollManager(bot)
 
-# Регистрация команд
+# Регистрация команд (ПОСЛЕ создания бота)
 bot.add_cog(PollCommands(bot))
 bot.add_cog(UserCommands(bot))
 bot.add_cog(AdminCommands(bot))
+
+# Импорт и настройка обработки ошибок (ПОСЛЕ создания бота)
+from utils.error_handler import setup_error_handling
+setup_error_handling(bot)
+
 
 # ==================== ФУНКЦИЯ СОЗДАНИЯ ПРИВЕТСТВЕННОГО СООБЩЕНИЯ ====================
 
